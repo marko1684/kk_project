@@ -9,9 +9,7 @@
 
 using namespace llvm;
 
-ADCEPass::ADCEPass() {
-    errs() << "DEBUG ADCEPass constructor called 123 123\n";
-}
+ADCEPass::ADCEPass() {}
 
 void ADCEPass::markInitiallyLive(Function &F,
                                  SmallPtrSetImpl<Instruction *> &Live,
@@ -24,10 +22,20 @@ void ADCEPass::markInitiallyLive(Function &F,
         }
 
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            if (SI->isVolatile()) {
-                Live.insert(&I);
-                Worklist.push_back(&I);
-            }
+            Live.insert(&I);
+            Worklist.push_back(&I);
+            continue;
+        }
+
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+            Live.insert(&I);
+            Worklist.push_back(&I);
+            continue;
+        }
+
+        if (auto *II = dyn_cast<InvokeInst>(&I)) {
+            Live.insert(&I);
+            Worklist.push_back(&I);
             continue;
         }
 
@@ -59,11 +67,14 @@ void ADCEPass::removeDeadInstructions(Function &F,
                                       SmallVectorImpl<Instruction *> &ToErase) {
     for (Instruction &I : instructions(F)) {
         if (!Live.contains(&I)) {
-            ToErase.push_back(&I);
+            if (I.use_empty()) {
+                ToErase.push_back(&I);
+            }
         }
     }
 
     for (Instruction *I : llvm::reverse(ToErase)) {
+        assert(I->use_empty() && "Cannot remove instruction with uses");
         I->eraseFromParent();
     }
 }
@@ -122,18 +133,36 @@ void ADCEPass::removeUnreachableBlocks(Function &F) {
 
 PreservedAnalyses ADCEPass::run(Function &F, FunctionAnalysisManager &) {
     outs() << "Running ADCE on function: " << F.getName() << "\n";
+    
+    size_t OriginalInstCount = F.getInstructionCount();
+    size_t OriginalBBCount = F.size();
 
     SmallPtrSet<Instruction *, 32> Live;
     SmallVector<Instruction *, 128> Worklist;
     SmallVector<Instruction *, 128> ToErase;
 
     markInitiallyLive(F, Live, Worklist);
+    outs() << "  Initially live instructions: " << Live.size() << "\n";
+    
     propagateLiveness(Live, Worklist);
+    outs() << "  Live instructions after propagation: " << Live.size() << "\n";
+    
     removeDeadInstructions(F, Live, ToErase);
     removeUnreachableBlocks(F);
 
-    outs() << "ADCE removed " << ToErase.size() << " instructions\n";
+    size_t FinalInstCount = F.getInstructionCount();
+    size_t FinalBBCount = F.size();
+    
+    outs() << "ADCE results:\n";
+    outs() << "  Instructions: " << OriginalInstCount << " -> " << FinalInstCount 
+           << " (removed " << (OriginalInstCount - FinalInstCount) << ")\n";
+    outs() << "  Basic blocks: " << OriginalBBCount << " -> " << FinalBBCount 
+           << " (removed " << (OriginalBBCount - FinalBBCount) << ")\n";
 
+    if (ToErase.empty() && OriginalBBCount == FinalBBCount) {
+        return PreservedAnalyses::all();
+    }
+    
     return PreservedAnalyses::none();
 }
 
